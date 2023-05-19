@@ -1,0 +1,102 @@
+image:
+  name: $CI_TEMPLATE_REGISTRY_HOST/gitlab-org/terraform-images/stable:latest
+
+variables:
+# If your terraform files are in a subdirectory, set TF_ROOT accordingly
+  TF_ROOT: ${CI_PROJECT_DIR}
+  TF_STATE_NAME: tf-state
+  TF_VAR_aws_role: arn:aws:iam::419853336562:role/mpf-gitlab
+  TF_VAR_aws_token: $CI_JOB_JWT_V2
+
+include:
+
+# Secret detection
+  - template: Security/Secret-Detection.gitlab-ci.yml
+# IaC SAST
+  - template: Jobs/SAST-IaC.gitlab-ci.yml
+
+
+# common settings for all jobs
+.job_template_common: &job-common
+  tags:
+    - otc_run_docker_k8s_s
+# ❗According to https://docs.gitlab.com/ee/ci/cloud_services/index.html,
+# CI_JOB_JWT and CI_JOB_JWT_V2 were deprecated in GitLab 15.9 and are scheduled
+# to be removed in GitLab 16.0. Use ID tokens instead!
+  id_tokens:
+    OIDC_TOKEN:
+      aud: https://gitlab.devops.telekom.de
+
+.set_assume_role_params: &set-assume-role-params
+  - AWS_WEB_IDENTITY_TOKEN_FILE=${CI_PROJECT_DIR}/web_identity_token
+  - export AWS_WEB_IDENTITY_TOKEN_FILE
+  - echo "${OIDC_TOKEN}" > ${AWS_WEB_IDENTITY_TOKEN_FILE}
+  - AWS_ROLE_SESSION_NAME="GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+  - export AWS_ROLE_SESSION_NAME
+
+stages:
+  - code_scanning
+  - validate
+  - init
+  - plan
+  - deploy
+#  - destroy
+
+iac-sast:
+  stage: code_scanning
+secret_detection:
+  stage: code_scanning
+
+tf-validate:
+  stage: validate
+  <<: *job-common
+  only:
+      variables:
+        - $MODE != 'release' && $MODE != 'sonar'
+  script:
+    - cd ${TF_ROOT}
+    - ./gitlab-terraform.sh validate
+
+tf-init:
+  stage: init
+  dependencies:
+      - validate
+  <<: *job-common
+  script:
+    - cd ${TF_ROOT}
+    - ./gitlab-terraform.sh init
+  artifacts:
+    paths:
+      - ${TF_ROOT}/.terraform.lock.hcl
+
+tf-plan:
+  stage: plan
+  dependencies:
+        - init
+  <<: *job-common
+  script:
+    - *set-assume-role-params
+    - cd ${TF_ROOT}
+    - ./gitlab-terraform.sh plan
+  artifacts:
+    paths:
+      - ${TF_ROOT}/plan.cache
+
+tf-apply:
+  stage: deploy
+  dependencies:
+          - plan
+  <<: *job-common
+  script:
+    - *set-assume-role-params
+    - cd ${TF_ROOT}
+    - ./gitlab-terraform.sh apply
+
+#tf-destroy:
+#  stage: destroy
+#  <<: *job-common
+#  script:
+#    - *set-assume-role-params
+#    - cd ${TF_ROOT}
+#    - ./gitlab-terraform.sh destroy
+
